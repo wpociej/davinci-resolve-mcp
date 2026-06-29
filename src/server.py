@@ -2,7 +2,7 @@
 """
 DaVinci Resolve MCP Server (Compound Tools)
 
-27 compound tools covering 100% of the DaVinci Resolve Scripting API (324 methods).
+29 compound tools covering 100% of the DaVinci Resolve Scripting API (324 methods).
 Each tool groups related operations via an 'action' parameter.
 
 Usage:
@@ -10,7 +10,7 @@ Usage:
     python src/server.py --full       # Start the 342-tool granular server instead
 """
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 import base64
 import os
@@ -2527,6 +2527,221 @@ def fusion_comp(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TOOL 28: execute_python — escape hatch for raw API access
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def execute_python(code: str) -> Dict[str, Any]:
+    """Execute arbitrary Python code with full DaVinci Resolve API access.
+
+    Use this when a compound tool doesn't cover what you need — raw scripting
+    API calls, complex batch loops, GUI-page-specific calls, or experimental
+    features.
+
+    Available globals (auto-injected):
+      resolve         — top-level Resolve object (resolve.GetProjectManager(), etc.)
+      project_manager — resolve.GetProjectManager()
+      project         — current project (None if no project open)
+      media_pool      — current MediaPool (None if no project)
+      timeline        — current Timeline (None if no timeline)
+      fusion          — resolve.Fusion()
+      dvr_script      — DaVinciResolveScript module
+      _ser            — helper that serializes Resolve objects to JSON-safe values
+
+    Return value:
+      - If `code` ends with an expression, that expression's value is returned (serialized)
+      - Else if a `result` variable is assigned, its value is returned
+      - All `print(...)` output is captured and returned as `stdout`
+
+    Example code:
+      tl = timeline
+      items = tl.GetItemListInTrack("video", 1)
+      [{"name": i.GetName(), "duration": i.GetDuration()} for i in items]
+
+    ⚠️ This tool runs ARBITRARY Python with full process privileges. It can read/write
+    files, call subprocess, mutate Resolve state, etc. Treat it as `eval()` — never
+    pass untrusted input to it.
+    """
+    import io
+    import ast
+    import contextlib
+    import traceback
+
+    r = get_resolve()
+    if r is None:
+        return _err("Not connected to DaVinci Resolve")
+
+    pm = r.GetProjectManager()
+    proj = pm.GetCurrentProject() if pm else None
+    mp = proj.GetMediaPool() if proj else None
+    tl = proj.GetCurrentTimeline() if proj else None
+    try:
+        fusion_obj = r.Fusion()
+    except Exception:
+        fusion_obj = None
+
+    exec_globals = {
+        "__name__": "__resolve_mcp_exec__",
+        "__builtins__": __builtins__,
+        "resolve": r,
+        "project_manager": pm,
+        "project": proj,
+        "media_pool": mp,
+        "timeline": tl,
+        "fusion": fusion_obj,
+        "dvr_script": dvr_script,
+        "_ser": _ser,
+    }
+
+    stdout_buf = io.StringIO()
+    last_value = None
+
+    try:
+        with contextlib.redirect_stdout(stdout_buf):
+            tree = ast.parse(code, mode="exec")
+            last_expr = None
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                last_expr = tree.body.pop().value
+                ast.fix_missing_locations(tree)
+
+            if tree.body:
+                exec(compile(tree, "<execute_python>", "exec"), exec_globals)
+
+            if last_expr is not None:
+                last_value = eval(
+                    compile(ast.Expression(last_expr), "<execute_python>", "eval"),
+                    exec_globals,
+                )
+            elif "result" in exec_globals:
+                last_value = exec_globals["result"]
+    except Exception as e:
+        return {
+            "error": f"{type(e).__name__}: {e}",
+            "traceback": traceback.format_exc(),
+            "stdout": stdout_buf.getvalue(),
+        }
+
+    return _ok(
+        result=_ser(last_value),
+        stdout=stdout_buf.getvalue(),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TOOL 29: auto_seed_magic_mask — auto-clicker for Magic Mask Person seeding
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def auto_seed_magic_mask(
+    clips: str = "all",
+    dry_run: bool = False,
+    debug: bool = False,
+) -> Dict[str, Any]:
+    """Auto-seed Magic Mask Person tracking on every clip in the active timeline.
+
+    DaVinci's CreateMagicMask API requires a click in the viewer before it can
+    track. This tool runs an external script (tools/auto_magic_mask/) that:
+      - reads each clip's source frame directly from disk (cv2.VideoCapture)
+      - detects the most prominent face with mediapipe BlazeFace
+      - moves the playhead to the clip's middle and clicks the face position
+        in the Resolve viewer
+      - triggers item.CreateMagicMask("BI") via the API
+
+    PRE-FLIGHT — do these in Resolve before calling:
+      1. Open Color page
+      2. Open Magic Mask palette (lower-left toolbar)
+      3. Set tracker mode to "People & Object", subject "Person"
+      4. Calibrate viewer rect once via:
+           venv/Scripts/python.exe tools/auto_magic_mask/auto_magic_mask.py --calibrate
+
+    Parameters:
+      clips: "all" or comma-separated 0-based indices ("1,3,5")
+      dry_run: don't click or trigger Magic Mask, just report face detections
+      debug: save annotated detection screenshots to auto_mm_debug/
+
+    Returns: parsed counts (success/skipped/failed) + raw stdout.
+
+    Note: this tool spawns a subprocess that takes control of the mouse pointer
+    while running. Don't move the mouse or switch windows during execution.
+    Windows-only at the moment (uses pywinauto).
+    """
+    _, _, err = _check()
+    if err:
+        return err
+
+    plugin = os.path.join(project_dir, "tools", "auto_magic_mask", "auto_magic_mask.py")
+    if not os.path.exists(plugin):
+        return _err(f"Plugin not found at {plugin}")
+
+    # Fail-fast: viewer rect must be calibrated before clicking, otherwise
+    # the heuristic estimate captures UI panels and clicks land on garbage.
+    # Allowed to skip in dry_run because we don't actually click.
+    cal_path = os.path.expanduser("~/.davinci_auto_magic_mask.json")
+    if not dry_run and not os.path.exists(cal_path):
+        return _err(
+            "Viewer rect not calibrated. Run once interactively: "
+            f"{sys.executable} {plugin} --calibrate "
+            "(it will ask you to point the mouse at the top-left and "
+            "bottom-right of the visible clip image area in the viewer)."
+        )
+
+    args = [sys.executable, plugin, "--clips", clips, "--no-prompt"]
+    if dry_run:
+        args.append("--dry-run")
+    if debug:
+        args.append("--debug")
+        args.extend(["--debug-dir",
+                     os.path.join(project_dir, "auto_mm_debug")])
+
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=project_dir,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired as e:
+        return _err(f"Plugin timed out after 600s: {e}")
+    except Exception as e:
+        return _err(f"Plugin spawn failed: {e}")
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+
+    # Parse the final summary line: "=== N ok, M skipped, K failed ==="
+    import re
+    summary = re.search(r"===\s*(\d+)\s*ok,\s*(\d+)\s*skipped,\s*(\d+)\s*failed\s*===", stdout)
+    counts = {}
+    if summary:
+        counts = {
+            "ok": int(summary.group(1)),
+            "skipped": int(summary.group(2)),
+            "failed": int(summary.group(3)),
+        }
+
+    if proc.returncode != 0:
+        return {
+            "error": (
+                f"Plugin exit code {proc.returncode}. "
+                f"Common causes: Resolve not focused, no timeline open, calibration missing. "
+                f"See stdout/stderr for details."
+            ),
+            "stdout": stdout,
+            "stderr": stderr,
+            "counts": counts,
+        }
+
+    return _ok(
+        counts=counts,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Server Startup
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2543,5 +2758,5 @@ if __name__ == "__main__":
         spec.loader.exec_module(mod)
         sys.exit(0)
 
-    logger.info(f"Starting DaVinci Resolve MCP Server (27 compound tools)")
+    logger.info(f"Starting DaVinci Resolve MCP Server (28 compound tools)")
     mcp.run()

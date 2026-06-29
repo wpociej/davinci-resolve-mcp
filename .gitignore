@@ -105,3 +105,9 @@ autoresearch/
 # Autoresearch artifacts
 run.log
 *.log.bak
+
+# Auto Magic Mask run artifacts (machine-specific calibration; debug frames
+# contain source footage — keep out of version control)
+auto_mm_debug/
+tools/auto_magic_mask/calibration_screenshot.jpg
+tools/auto_magic_mask/corner_*.jpg

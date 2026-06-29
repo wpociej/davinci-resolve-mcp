@@ -1,8 +1,8 @@
 # DaVinci Resolve MCP Server
 
-[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
+[![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)](https://github.com/samuelgursky/davinci-resolve-mcp/releases)
 [![API Coverage](https://img.shields.io/badge/API%20Coverage-100%25-brightgreen.svg)](#api-coverage)
-[![Tools](https://img.shields.io/badge/MCP%20Tools-27%20(342%20full)-blue.svg)](#server-modes)
+[![Tools](https://img.shields.io/badge/MCP%20Tools-29%20(342%20full)-blue.svg)](#server-modes)
 [![Tested](https://img.shields.io/badge/Live%20Tested-98.5%25-green.svg)](#test-results)
 [![DaVinci Resolve](https://img.shields.io/badge/DaVinci%20Resolve-18.5+-darkred.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 [![Python](https://img.shields.io/badge/python-3.10--3.12-green.svg)](https://www.python.org/downloads/)
@@ -10,7 +10,14 @@
 
 A Model Context Protocol (MCP) server providing **complete coverage** of the DaVinci Resolve Scripting API. Connect AI assistants (Claude, Cursor, Windsurf) to DaVinci Resolve and control every aspect of your post-production workflow through natural language.
 
-### What's New in v2.1.0
+### What's New in v2.2.0
+
+- **New `auto_seed_magic_mask` tool** — auto-seeds Magic Mask Person tracking across every clip in the active timeline. `CreateMagicMask` silently returns `False` unless a seed point was clicked in the viewer first; this tool does the click. It reads each clip's source frame directly via OpenCV (`cv2.VideoCapture`), detects the subject's face with **mediapipe BlazeFace**, maps the detection to absolute viewer screen coordinates, and clicks via pyautogui before the API call. Ships as the `tools/auto_magic_mask/` plugin (one-time interactive viewer calibration required; refuses real-mode runs without it)
+- **New `execute_python` tool** — escape hatch that runs arbitrary Python against the live Resolve API with `resolve`, `project_manager`, `project`, `media_pool`, `timeline`, `fusion`, `dvr_script` pre-injected. Captures `print()` and returns the last expression's value. For API discovery (`dir(item)`) and one-shot work the compound tools don't cover. Runs with full process privileges — never pass untrusted input
+- **New `auto_grade.py` plugin** — batch warm-grade helper: adds serial/outside nodes via `Alt+S` / `Alt+O` keyboard shortcuts (the Resolve API exposes no `AddNode`) and applies CDL on the new nodes
+- **Compound server now exposes 29 tools** (was 27)
+
+### v2.1.0
 
 - **New `fusion_comp` tool** — 20-action tool exposing the full Fusion composition node graph API. Add/delete/find nodes, wire connections, set/get parameters, manage keyframes, control undo grouping, set render ranges, and trigger renders — all on the currently active Fusion page composition
 - **`timeline_item_fusion` cache actions** — added `get_cache_enabled` and `set_cache` actions for Fusion output cache control directly on timeline items
